@@ -121,7 +121,18 @@ EOF
             sudo systemctl daemon-reexec
             sudo systemctl daemon-reload
             sudo systemctl enable filebrowser
+            # Start File Browser
             sudo systemctl start filebrowser
+            
+            # Wait a few seconds for initialization
+            sleep 5
+            
+            # Extract the randomly generated password from the logs
+            PASSWORD=$(sudo journalctl -u filebrowser -n 20 --no-pager | grep "User 'admin' initialized with randomly generated password" | tail -n1 | awk -F': ' '{print $NF}')
+            
+            echo
+            echo "File Browser admin password: $PASSWORD"
+            echo "Access File Browser at http://$(hostname -I | awk '{print $1}'):8080"
             ;;
         ssh-key)
             read -p "Enter your GitHub email address: " user_email
