@@ -117,22 +117,36 @@ ExecStart=/usr/local/bin/filebrowser -c /etc/filebrowser.json
 WantedBy=multi-user.target
 EOF
 
-            echo -e "$INFO_LABEL ${CYAN}Starting Filebrowser service...${RESET}"
-            systemctl daemon-reexec
-            systemctl daemon-reload
-            systemctl enable filebrowser
-            # Start File Browser
-            systemctl start filebrowser
-            
-            # Wait a few seconds for initialization
-            sleep 5
-            
-            # Extract the randomly generated password from the logs
-            PASSWORD=$(journalctl -u filebrowser -n 20 --no-pager | grep "User 'admin' initialized with randomly generated password" | tail -n1 | awk -F': ' '{print $NF}')
-            
-            echo
-            echo "File Browser admin password: $PASSWORD"
-            echo "Access File Browser at http://$(hostname -I | awk '{print $1}'):8080"
+			echo -e "$INFO_LABEL ${CYAN}Preparing Filebrowser...${RESET}"
+
+			FILEBROWSER_BIN=$(command -v filebrowser)
+			FILEBROWSER_CONFIG="/etc/filebrowser.json"
+			FILEBROWSER_DB="/etc/filebrowser.db"
+
+			# Create admin user only if DB does not exist
+			if [ ! -f "$FILEBROWSER_DB" ]; then
+				echo -e "$INFO_LABEL ${CYAN}Initialising Filebrowser database...${RESET}"
+
+				"$FILEBROWSER_BIN" -c "$FILEBROWSER_CONFIG" config init
+
+				PASSWORD=$(openssl rand -base64 18)
+
+				"$FILEBROWSER_BIN" -c "$FILEBROWSER_CONFIG" users add admin "$PASSWORD" --perm.admin
+
+				echo
+				echo -e "$OK_LABEL ${GREEN}File Browser admin password: $PASSWORD${RESET}"
+			else
+				echo -e "$INFO_LABEL ${CYAN}Existing database detected — skipping user creation${RESET}"
+			fi
+
+			echo -e "$INFO_LABEL ${CYAN}Starting Filebrowser service...${RESET}"
+			systemctl daemon-reexec
+			systemctl daemon-reload
+			systemctl enable filebrowser
+			systemctl restart filebrowser
+
+			echo
+			echo "Access File Browser at: http://$(hostname -I | awk '{print $1}'):8080"
             ;;
         ssh-key)
             read -p "Enter your GitHub email address: " user_email
