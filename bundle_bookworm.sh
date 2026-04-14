@@ -1,41 +1,21 @@
 #!/bin/bash
 
-set -euo pipefail
+set -e
 
-# ===== Colours =====
+# Colors and labels
 GREEN='\033[0;32m'
 CYAN='\033[0;36m'
 YELLOW='\033[1;33m'
 RESET='\033[0m'
-
 INFO_LABEL="[INFO]"
 OK_LABEL="[OK]"
 WARN_LABEL="[WARN]"
 
-# ===== User Detection =====
-REAL_USER=${SUDO_USER:-$(logname 2>/dev/null || echo root)}
-HOME_DIR=$(eval echo "~$REAL_USER")
+# Automatically detect subnet (e.g., 192.168.10.0/24)
+SUBNET=$(ip -o -f inet addr show | awk '/scope global/ {sub(/\/.*/, "", $4); split($4, a, "."); print a[1]"."a[2]"."a[3]".0/24"; exit}')
+echo -e "$INFO_LABEL ${CYAN}Detected local subnet: $SUBNET${RESET}"
 
-# ===== Dependency Install =====
-echo -e "$INFO_LABEL ${CYAN}Installing required dependencies...${RESET}"
-apt update -y
-apt install -y curl openssh-client ca-certificates lsb-release
-
-# ===== Detect Network =====
-DEFAULT_IF=$(ip route | awk '/default/ {print $5; exit}')
-LOCAL_IP=$(ip route get 1.1.1.1 | awk '{print $7; exit}')
-SUBNET=$(ip -o -f inet addr show "$DEFAULT_IF" | awk '{print $4}')
-
-echo -e "$INFO_LABEL ${CYAN}Interface: $DEFAULT_IF${RESET}"
-echo -e "$INFO_LABEL ${CYAN}Local IP: $LOCAL_IP${RESET}"
-echo -e "$INFO_LABEL ${CYAN}Subnet: $SUBNET${RESET}"
-
-# ===== Detect Container =====
-if systemd-detect-virt -c | grep -q lxc; then
-    echo -e "$WARN_LABEL ${YELLOW}Running inside LXC container - firewall rules may not apply as expected.${RESET}"
-fi
-
-# ===== Options =====
+# Installable options
 declare -A options=(
     [1]="nano"
     [2]="ufw"
@@ -48,26 +28,30 @@ echo -e "\n${CYAN}Select what to install:${RESET}"
 for i in "${!options[@]}"; do
     echo "  $i) ${options[$i]}"
 done
-echo "  All) Install all"
+echo "  All) Install all of the above"
 
-read -rp "Enter option: " selection
+read -p "Enter option (number or 'All'): " selection
 
+install_all=false
 install_selection=()
 
 if [[ "$selection" =~ ^[Aa]ll$ ]]; then
+    install_all=true
     install_selection=("${options[@]}")
 elif [[ "${options[$selection]+exists}" ]]; then
     install_selection+=("${options[$selection]}")
 else
-    echo -e "$WARN_LABEL ${YELLOW}Invalid selection${RESET}"
+    echo -e "$WARN_LABEL ${YELLOW}Invalid selection. Exiting.${RESET}"
     exit 1
 fi
 
-# ===== Package helper =====
+echo -e "$INFO_LABEL ${CYAN}Updating package lists...${RESET}"
+apt update
+
 install_or_update() {
     local pkg=$1
     if dpkg -s "$pkg" >/dev/null 2>&1; then
-        echo -e "$INFO_LABEL ${CYAN}$pkg already installed, upgrading...${RESET}"
+        echo -e "$INFO_LABEL ${CYAN}$pkg already installed. Checking for updates...${RESET}"
         apt install --only-upgrade -y "$pkg"
     else
         echo -e "$INFO_LABEL ${CYAN}Installing $pkg...${RESET}"
@@ -75,71 +59,7 @@ install_or_update() {
     fi
 }
 
-# ===== Filebrowser Setup =====
-setup_filebrowser() {
-    FILEBROWSER_DIR="/home/filebrowser"
-    FILEBROWSER_CONFIG="/etc/filebrowser.json"
-    FILEBROWSER_DB="/etc/filebrowser.db"
-
-    echo -e "$INFO_LABEL ${CYAN}Setting up Filebrowser...${RESET}"
-
-    mkdir -p "$FILEBROWSER_DIR"
-    chown "$REAL_USER":"$REAL_USER" "$FILEBROWSER_DIR"
-
-    # Install binary if needed
-    FILEBROWSER_BIN=$(command -v filebrowser || true)
-    if [ -z "$FILEBROWSER_BIN" ]; then
-        curl -fsSL https://raw.githubusercontent.com/filebrowser/get/master/get.sh | bash
-        FILEBROWSER_BIN=$(command -v filebrowser)
-    fi
-
-    # Create config
-    tee "$FILEBROWSER_CONFIG" >/dev/null <<EOF
-{
-  "port": 8080,
-  "baseURL": "",
-  "address": "$LOCAL_IP",
-  "log": "stdout",
-  "database": "$FILEBROWSER_DB",
-  "root": "$FILEBROWSER_DIR"
-}
-EOF
-
-    # Initialise DB with known credentials
-    if [ ! -f "$FILEBROWSER_DB" ]; then
-        "$FILEBROWSER_BIN" -c "$FILEBROWSER_CONFIG" config init
-        "$FILEBROWSER_BIN" -c "$FILEBROWSER_CONFIG" users add admin admin --perm.admin
-    fi
-
-    # systemd service
-    tee /etc/systemd/system/filebrowser.service >/dev/null <<EOF
-[Unit]
-Description=File Browser
-After=network.target
-
-[Service]
-User=root
-Group=root
-ExecStart=$FILEBROWSER_BIN -c $FILEBROWSER_CONFIG
-Restart=always
-RestartSec=5
-WorkingDirectory=/etc
-LimitNOFILE=4096
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-    systemctl daemon-reexec
-    systemctl daemon-reload
-    systemctl enable filebrowser
-    systemctl restart filebrowser
-
-    echo -e "$OK_LABEL ${GREEN}Filebrowser running at http://$LOCAL_IP:8080${RESET}"
-    echo -e "$INFO_LABEL ${CYAN}Login: admin / admin${RESET}"
-}
-
-# ===== Main Install Loop =====
+# Install selected apps
 for app in "${install_selection[@]}"; do
     case "$app" in
         nano)
@@ -147,58 +67,155 @@ for app in "${install_selection[@]}"; do
             ;;
         ufw)
             install_or_update ufw
+            echo -e "$INFO_LABEL ${CYAN}Allowing SSH (port 22) from $SUBNET...${RESET}"
             ufw allow from "$SUBNET" to any port 22 proto tcp
-            echo -e "$OK_LABEL ${GREEN}SSH rule added${RESET}"
+            echo -e "$OK_LABEL ${GREEN}UFW rule for SSH added (not enabled).${RESET}"
             ;;
         rsync)
             install_or_update rsync
             ;;
         filebrowser)
-            setup_filebrowser
+            FILEBROWSER_DIR="/home/filebrowser"
+            if [ ! -d "$FILEBROWSER_DIR" ]; then
+                echo -e "$INFO_LABEL ${CYAN}Creating $FILEBROWSER_DIR...${RESET}"
+                mkdir -p "$FILEBROWSER_DIR"
+                chown "$USER":"$USER" "$FILEBROWSER_DIR"
+            fi
+
+            if ! command -v filebrowser >/dev/null 2>&1; then
+                echo -e "$INFO_LABEL ${CYAN}Installing Filebrowser...${RESET}"
+                curl -fsSL https://raw.githubusercontent.com/filebrowser/get/master/get.sh | bash
+            else
+                echo -e "$INFO_LABEL ${CYAN}Filebrowser already installed.${RESET}"
+            fi
+
+            LOCAL_IP=$(hostname -I | awk '{print $1}')
+            FILEBROWSER_CONFIG="/etc/filebrowser.json"
+            echo -e "$INFO_LABEL ${CYAN}Writing config to $FILEBROWSER_CONFIG...${RESET}"
+            tee "$FILEBROWSER_CONFIG" >/dev/null <<EOF
+{
+  "port": 8080,
+  "baseURL": "",
+  "address": "$LOCAL_IP",
+  "log": "stdout",
+  "database": "/etc/filebrowser.db",
+  "root": "$FILEBROWSER_DIR"
+}
+EOF
+
+            FILEBROWSER_SERVICE="/etc/systemd/system/filebrowser.service"
+            echo -e "$INFO_LABEL ${CYAN}Creating Filebrowser service...${RESET}"
+            tee "$FILEBROWSER_SERVICE" >/dev/null <<EOF
+[Unit]
+Description=File Browser
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/filebrowser -c /etc/filebrowser.json
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+            echo -e "$INFO_LABEL ${CYAN}Starting Filebrowser service...${RESET}"
+            systemctl daemon-reexec
+            systemctl daemon-reload
+            systemctl enable filebrowser
+            # Start File Browser
+            systemctl start filebrowser
+            
+            # Wait a few seconds for initialization
+            sleep 5
+            
+            # Extract the randomly generated password from the logs
+            PASSWORD=$(journalctl -u filebrowser -n 20 --no-pager | grep "User 'admin' initialized with randomly generated password" | tail -n1 | awk -F': ' '{print $NF}')
+            
+            echo
+            echo "File Browser admin password: $PASSWORD"
+            echo "Access File Browser at http://$(hostname -I | awk '{print $1}'):8080"
             ;;
         ssh-key)
-            read -rp "Enter email: " user_email
-            ssh_key_path="$HOME_DIR/.ssh/id_ed25519"
+            read -p "Enter your GitHub email address: " user_email
+            ssh_key_path="$HOME/.ssh/id_ed25519"
 
             if [ -f "$ssh_key_path" ]; then
-                echo -e "$WARN_LABEL ${YELLOW}SSH key exists${RESET}"
+                echo -e "$WARN_LABEL ${YELLOW}SSH key already exists at $ssh_key_path. Skipping creation.${RESET}"
             else
-                sudo -u "$REAL_USER" ssh-keygen -t ed25519 -C "$user_email" -f "$ssh_key_path" -N ""
-                echo -e "$OK_LABEL ${GREEN}SSH key created${RESET}"
+                echo -e "$INFO_LABEL ${CYAN}Creating SSH key...${RESET}"
+                ssh-keygen -t ed25519 -C "$user_email" -f "$ssh_key_path" -N ""
+                eval "$(ssh-agent -s)"
+                ssh-add "$ssh_key_path"
+                echo -e "\n✅ SSH key created and added to the SSH agent."
+                echo -e "📋 Copy the following public key into your GitHub SSH settings:"
+                echo -e "--------------------------------------------------------------"
                 cat "$ssh_key_path.pub"
+                echo -e "--------------------------------------------------------------"
             fi
+            ;;
+        *)
+            echo -e "$WARN_LABEL ${YELLOW}Unknown option: $app${RESET}"
             ;;
     esac
 done
 
-# ===== UFW Post Config =====
-if command -v ufw >/dev/null 2>&1 && command -v filebrowser >/dev/null 2>&1; then
+# Add UFW rule for Filebrowser if both installed
+if dpkg -s "ufw" >/dev/null 2>&1 && command -v filebrowser >/dev/null 2>&1; then
+    echo -e "$INFO_LABEL ${CYAN}Adding UFW rule to allow port 8080 from $SUBNET...${RESET}"
     ufw allow from "$SUBNET" to any port 8080 proto tcp
+    echo -e "$OK_LABEL ${GREEN}UFW rule for Filebrowser added.${RESET}"
 fi
 
+# Symlink option for filebrowser
+if [[ " ${install_selection[@]} " =~ " filebrowser " ]]; then
+    read -p "Do you want to symlink a folder into /home/filebrowser/? (y/n): " want_symlink
+    if [[ "$want_symlink" =~ ^[Yy]$ ]]; then
+        read -p "Enter the source directory to symlink: " src
+        read -p "Enter the name for the destination folder (relative to /home/filebrowser/): " dest
+        dest_path="/home/filebrowser/$dest"
+
+        if [ -e "$src" ]; then
+            if [ ! -e "$dest_path" ]; then
+                ln -s "$src" "$dest_path"
+                echo -e "$OK_LABEL ${GREEN}Symlink created: $dest_path -> $src${RESET}"
+            else
+                echo -e "$WARN_LABEL ${YELLOW}Destination already exists. Skipping symlink.${RESET}"
+            fi
+        else
+            echo -e "$WARN_LABEL ${YELLOW}Source does not exist. Skipping symlink.${RESET}"
+        fi
+    else
+        echo -e "$INFO_LABEL ${CYAN}No symlink created.${RESET}"
+    fi
+fi
+
+# Show UFW status
 if command -v ufw >/dev/null 2>&1; then
-    ufw status verbose || true
-    read -rp "Enable UFW? (y/n): " enable_ufw
+    echo -e "\n$INFO_LABEL ${CYAN}Current UFW status:${RESET}"
+    ufw status verbose
+
+    read -p "Do you want to enable UFW now? (y/n): " enable_ufw
     if [[ "$enable_ufw" =~ ^[Yy]$ ]]; then
         ufw enable
+        echo -e "$OK_LABEL ${GREEN}UFW enabled.${RESET}"
+    else
+        echo -e "$INFO_LABEL ${CYAN}UFW not enabled.${RESET}"
     fi
 fi
 
-# ===== Symlink Option =====
-if [[ " ${install_selection[*]} " =~ " filebrowser " ]]; then
-    read -rp "Create symlink into /home/filebrowser? (y/n): " yn
-    if [[ "$yn" =~ ^[Yy]$ ]]; then
-        read -rp "Source path: " src
-        read -rp "Destination name: " dest
-        ln -s "$src" "/home/filebrowser/$dest" 2>/dev/null || \
-        echo -e "$WARN_LABEL ${YELLOW}Failed or already exists${RESET}"
-    fi
+# Notify about Filebrowser URL
+if command -v filebrowser >/dev/null 2>&1; then
+    echo -e "\n$INFO_LABEL ${CYAN}Filebrowser is running at: http://$LOCAL_IP:8080${RESET}"
+    echo -e "$INFO_LABEL ${CYAN}Default Login: admin / admin${RESET}"
 fi
 
-# ===== Git Self Update =====
+# Git repo update (if inside git)
 if [ -d .git ]; then
+    echo -e "\n$INFO_LABEL ${CYAN}Updating bundle.sh from the latest repo version...${RESET}"
     git fetch origin
-    git checkout origin/$(git rev-parse --abbrev-ref HEAD) -- bundle.sh || true
+    git checkout origin/$(git rev-parse --abbrev-ref HEAD) -- bundle.sh
+    echo -e "$OK_LABEL ${GREEN}bundle.sh updated from Git repo.${RESET}"
+else
+    echo -e "$WARN_LABEL ${YELLOW}Not a Git repo. Skipping auto-update.${RESET}"
 fi
 
-echo -e "\n$OK_LABEL ${GREEN}Completed${RESET}"
+echo -e "\n$OK_LABEL ${GREEN}Setup complete.${RESET}"
