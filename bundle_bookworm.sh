@@ -117,36 +117,45 @@ ExecStart=/usr/local/bin/filebrowser -c /etc/filebrowser.json
 WantedBy=multi-user.target
 EOF
 
-			echo -e "$INFO_LABEL ${CYAN}Preparing Filebrowser...${RESET}"
+			echo -e "$INFO_LABEL ${CYAN}Starting Filebrowser (first boot capture)...${RESET}"
 
 			FILEBROWSER_BIN=$(command -v filebrowser)
 			FILEBROWSER_CONFIG="/etc/filebrowser.json"
 			FILEBROWSER_DB="/etc/filebrowser.db"
 
-			# Create admin user only if DB does not exist
-			if [ ! -f "$FILEBROWSER_DB" ]; then
-				echo -e "$INFO_LABEL ${CYAN}Initialising Filebrowser database...${RESET}"
+			# Ensure fresh first boot
+			rm -f "$FILEBROWSER_DB"
 
-				"$FILEBROWSER_BIN" -c "$FILEBROWSER_CONFIG" config init
+			# Run in background and capture output
+			TMP_LOG=$(mktemp)
 
-				PASSWORD=$(openssl rand -base64 18)
+			"$FILEBROWSER_BIN" -c "$FILEBROWSER_CONFIG" > "$TMP_LOG" 2>&1 &
+			FB_PID=$!
 
-				"$FILEBROWSER_BIN" -c "$FILEBROWSER_CONFIG" users add admin "$PASSWORD" --perm.admin
+			# Wait briefly for startup
+			sleep 3
 
-				echo
-				echo -e "$OK_LABEL ${GREEN}File Browser admin password: $PASSWORD${RESET}"
-			else
-				echo -e "$INFO_LABEL ${CYAN}Existing database detected — skipping user creation${RESET}"
-			fi
+			# Kill process (we only needed bootstrap output)
+			kill "$FB_PID" 2>/dev/null || true
+			wait "$FB_PID" 2>/dev/null || true
 
+			# Extract password
+			PASSWORD=$(grep -i "password" "$TMP_LOG" | tail -n1 | awk -F': ' '{print $NF}')
+
+			rm -f "$TMP_LOG"
+
+			echo
+			echo -e "$OK_LABEL ${GREEN}File Browser admin password: $PASSWORD${RESET}"
+
+			# Now start via systemd properly
 			echo -e "$INFO_LABEL ${CYAN}Starting Filebrowser service...${RESET}"
 			systemctl daemon-reexec
 			systemctl daemon-reload
 			systemctl enable filebrowser
-			systemctl restart filebrowser
+			systemctl start filebrowser
 
 			echo
-			echo "Access File Browser at: http://$(hostname -I | awk '{print $1}'):8080"
+			echo "Access File Browser at http://$(hostname -I | awk '{print $1}'):8080"
             ;;
         ssh-key)
             read -p "Enter your GitHub email address: " user_email
