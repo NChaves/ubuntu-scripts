@@ -111,7 +111,7 @@ Description=File Browser
 After=network.target
 
 [Service]
-ExecStart=/usr/local/bin/filebrowser -c /etc/filebrowser.json
+ExecStart=/usr/local/bin/filebrowser -c /etc/filebrowser.json --followExternalSymlinks
 
 [Install]
 WantedBy=multi-user.target
